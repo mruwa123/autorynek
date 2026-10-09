@@ -41,6 +41,8 @@ public final class MarketBot {
 
     private static long startedAt;
     private static long lastCommand;
+    private static long lastActivity;
+    private static long foreignSince;
     private static long lastClickAt;
     private static long openedAt;
     private static boolean awaitingMarket;
@@ -69,6 +71,8 @@ public final class MarketBot {
         confirmSyncId = -1;
         confirmClicked = false;
         startedAt = System.currentTimeMillis();
+        lastActivity = startedAt;
+        foreignSince = 0;
         lastCommand = 0;
         running = true;
     }
@@ -107,6 +111,18 @@ public final class MarketBot {
 
         Screen screen = mc.currentScreen;
 
+        // watchdog: 10 s bez żadnej akcji (komenda / kliknięcie / odświeżenie) = coś utknęło, zaczynamy od nowa
+        if (now - lastActivity > 10_000) {
+            lastActivity = now;
+            if (screen instanceof GenericContainerScreen) player.closeHandledScreen();
+            marketSyncId = -1;
+            confirmSyncId = -1;
+            awaitingMarket = false;
+            foreignSince = 0;
+            lastCommand = 0;
+            return;
+        }
+
         if (screen instanceof GenericContainerScreen gcs) {
             GenericContainerScreenHandler handler = gcs.getScreenHandler();
             if (awaitingMarket) {
@@ -118,11 +134,21 @@ public final class MarketBot {
             }
             // tuż po kliknięciu oferty: okno "POTWIERDŹ ZAKUP" (nowe okno albo to samo z podmienioną zawartością)
             if (handleConfirm(mc, player, gcs, handler, cfg, now)) return;
-            if (handler.syncId != marketSyncId) return; // cudza skrzynia - nie ruszamy
+            if (handler.syncId != marketSyncId) {
+                // okno, którego nie otworzył bot (np. serwer sam coś otworzył po zakupie) - po chwili zamknij
+                if (foreignSince == 0) foreignSince = now;
+                else if (now - foreignSince > 2500) {
+                    player.closeHandledScreen();
+                    foreignSince = 0;
+                }
+                return;
+            }
+            foreignSince = 0;
             handleMarket(mc, player, handler, cfg, now);
             return;
         }
 
+        foreignSince = 0;
         marketSyncId = -1;
         if (screen == null) {
             long gap = Math.max(cfg.scanMs, 500);
@@ -131,6 +157,7 @@ public final class MarketBot {
                 if (cmd.startsWith("/")) cmd = cmd.substring(1);
                 if (!cmd.isEmpty()) net.sendChatCommand(cmd);
                 lastCommand = now;
+                lastActivity = now;
                 awaitingMarket = true;
             }
         }
@@ -180,6 +207,7 @@ public final class MarketBot {
             if (now - lastClickAt < cfg.clickMs) return; // czekamy na odstęp między kliknięciami
             mc.interactionManager.clickSlot(handler.syncId, best.slot(), 0, SlotActionType.PICKUP, player);
             lastClickAt = now;
+            lastActivity = now;
             clicked.add(best.slot());
             lastClick = "slot " + best.slot() + ": " + best.name();
             pending = new Pending(now, best.entry(), best.price(), best.count());
@@ -228,6 +256,7 @@ public final class MarketBot {
             lastClick = "potwierdź: slot " + slot;
             confirmClicked = true;
             confirmClickAt = now;
+            lastActivity = now;
             return true;
         }
 
@@ -300,6 +329,7 @@ public final class MarketBot {
 
     private static void refresh(ClientPlayerEntity player, GenericContainerScreenHandler handler,
                                 MinecraftClient mc, Config cfg, long now) {
+        lastActivity = now;
         if (cfg.refreshSlot >= 0 && cfg.refreshSlot < handler.slots.size()) {
             mc.interactionManager.clickSlot(handler.syncId, cfg.refreshSlot, 0, SlotActionType.PICKUP, player);
             lastClick = "slot " + cfg.refreshSlot + ": odświeżenie";
