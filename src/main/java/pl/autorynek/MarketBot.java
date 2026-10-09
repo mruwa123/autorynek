@@ -116,11 +116,9 @@ public final class MarketBot {
                 viewDone = false;
                 clicked.clear();
             }
-            if (handler.syncId != marketSyncId) {
-                // okno otwarte tuż po naszym kliknięciu w ofertę = okno "POTWIERDŹ ZAKUP"
-                if (pending != null && now - pending.time() < 5000) handleConfirm(mc, player, handler, cfg, now);
-                return; // cudza skrzynia - nie ruszamy
-            }
+            // tuż po kliknięciu oferty: okno "POTWIERDŹ ZAKUP" (nowe okno albo to samo z podmienioną zawartością)
+            if (handleConfirm(mc, player, gcs, handler, cfg, now)) return;
+            if (handler.syncId != marketSyncId) return; // cudza skrzynia - nie ruszamy
             handleMarket(mc, player, handler, cfg, now);
             return;
         }
@@ -196,50 +194,67 @@ public final class MarketBot {
     // ---------------------------------------------------------------- okno potwierdzenia zakupu
 
     private static int confirmSyncId = -1;
+    private static long confirmForClick;
     private static long confirmSeenAt;
     private static long confirmClickAt;
     private static boolean confirmClicked;
 
-    private static void handleConfirm(MinecraftClient mc, ClientPlayerEntity player,
-                                      GenericContainerScreenHandler handler, Config cfg, long now) {
-        if (handler.syncId != confirmSyncId) {
-            confirmSyncId = handler.syncId;
+    /**
+     * @return true, jeśli ten tick został zużyty na obsługę potwierdzenia (reszta pętli ma go pominąć).
+     */
+    private static boolean handleConfirm(MinecraftClient mc, ClientPlayerEntity player, GenericContainerScreen screen,
+                                         GenericContainerScreenHandler handler, Config cfg, long now) {
+        Pending p = pending;
+        if (p == null || now - p.time() >= 5000) return false;
+
+        if (confirmForClick != p.time()) { // nowe kliknięcie w ofertę = nowe potwierdzenie do obsłużenia
+            confirmForClick = p.time();
             confirmSeenAt = now;
             confirmClicked = false;
         }
-        if (confirmClicked) {
-            if (now - confirmClickAt > 3000) player.closeHandledScreen(); // okno utknęło - zamknij
-            return;
-        }
-        if (now - confirmSeenAt < Math.max(100, cfg.clickMs)) return; // poczekaj na zawartość okna
+        boolean sameWindow = handler.syncId == marketSyncId;
+        confirmSyncId = sameWindow ? -1 : handler.syncId;
 
-        int slot = findConfirmSlot(handler, cfg);
+        if (confirmClicked) {
+            if (sameWindow) return false; // po potwierdzeniu wracamy do zwykłej pętli rynku
+            if (now - confirmClickAt > 3000) player.closeHandledScreen(); // okno utknęło - zamknij
+            return true;
+        }
+        if (now - confirmSeenAt < Math.max(100, cfg.clickMs)) return true; // poczekaj na zawartość okna
+
+        int slot = findConfirmSlot(handler, cfg, !sameWindow);
         if (slot >= 0) {
             mc.interactionManager.clickSlot(handler.syncId, slot, 0, SlotActionType.PICKUP, player);
             lastClick = "potwierdź: slot " + slot;
             confirmClicked = true;
             confirmClickAt = now;
-            return;
+            return true;
         }
 
         if (now - confirmSeenAt > 1500) {
-            // nie znaleziono przycisku - wypisz sloty na czat, żeby można było ustawić "confirmSlot"
-            AutoRynekMod.chat("Nie znaleziono przycisku potwierdzenia. Sloty w oknie:");
-            int shown = 0;
-            int total = Math.min(handler.getRows() * 9, handler.slots.size());
-            for (int i = 0; i < total && shown < 14; i++) {
-                ItemStack st = handler.slots.get(i).getStack();
-                if (st.isEmpty()) continue;
-                AutoRynekMod.chat("  slot " + i + ": " + ItemUtil.plainName(st));
-                shown++;
-            }
-            AutoRynekMod.chat("Ustaw w autorynek.json \"confirmSlot\" na numer slotu przycisku Potwierdź.");
-            confirmClicked = true; // żeby nie spamować; okno zamknie się samo po 3 s
+            confirmClicked = true; // koniec czekania
             confirmClickAt = now;
+            if (!sameWindow) {
+                // nowe okno, ale bez rozpoznanego przycisku - wypisz jego zawartość na czat
+                AutoRynekMod.chat("Nie znaleziono przycisku potwierdzenia. Okno: \"" + screen.getTitle().getString()
+                        + "\", rzędów: " + handler.getRows());
+                int shown = 0;
+                int total = Math.min(handler.getRows() * 9, handler.slots.size());
+                for (int i = 0; i < total && shown < 16; i++) {
+                    ItemStack st = handler.slots.get(i).getStack();
+                    if (st.isEmpty()) continue;
+                    String lore = ItemUtil.loreLines(st).stream().findFirst().orElse("");
+                    AutoRynekMod.chat("  slot " + i + ": [" + ItemUtil.itemId(st) + "] \"" + ItemUtil.plainName(st)
+                            + "\" " + lore);
+                    shown++;
+                }
+                AutoRynekMod.chat("Ustaw w autorynek.json \"confirmSlot\" na numer slotu przycisku Potwierdź.");
+            }
         }
+        return true;
     }
 
-    private static int findConfirmSlot(GenericContainerScreenHandler handler, Config cfg) {
+    private static int findConfirmSlot(GenericContainerScreenHandler handler, Config cfg, boolean allowColorGuess) {
         if (cfg.confirmSlot >= 0 && cfg.confirmSlot < handler.slots.size()) return cfg.confirmSlot;
         int total = Math.min(handler.getRows() * 9, handler.slots.size());
         String[] keys = {"potwierd", "zatwierd", "akcept"};
@@ -260,6 +275,15 @@ public final class MarketBot {
             for (String line : ItemUtil.loreLines(st)) {
                 String l = Config.normalize(line);
                 for (String k : keys) if (l.contains(k)) return i;
+            }
+        }
+        // 3) tylko w nowym oknie: zielony przedmiot (lime/green) = potwierdź
+        if (allowColorGuess) {
+            for (int i = 0; i < total; i++) {
+                ItemStack st = handler.slots.get(i).getStack();
+                if (st.isEmpty()) continue;
+                String id = ItemUtil.itemId(st);
+                if ((id.contains("lime") || id.contains("green")) && !id.contains("red")) return i;
             }
         }
         return -1;
