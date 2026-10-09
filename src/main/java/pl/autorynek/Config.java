@@ -42,6 +42,8 @@ public final class Config {
     public boolean buyAll = false;
     /** numer slotu przycisku odświeżania w rynku; -1 = zamknij i otwórz rynek komendą od nowa */
     public int refreshSlot = -1;
+    /** numer slotu przycisku "Potwierdź" w oknie potwierdzenia zakupu; -1 = szukaj automatycznie po nazwie */
+    public int confirmSlot = -1;
     /** wzorce wiadomości czatu rozpoznające udany zakup / przegapienie (do statystyk na HUD) */
     public String buyPattern = "(?i)(kupi[łl]e[śs]|zakupi[łl]e[śs]|pomy[śs]lnie|zakupiono|kupiono)";
     public String missPattern = "(?i)(kto[śs] (ci )?(ubieg|wyprzed)|ju[żz] sprzedan|nie jest ju[żz]|nie istnieje|niedost[ęe]pn)";

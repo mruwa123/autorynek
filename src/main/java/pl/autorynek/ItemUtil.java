@@ -7,6 +7,9 @@ import net.minecraft.registry.Registries;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /** Pomocnicze odczyty z ItemStack (nazwa bez kolorów, cena z lore). */
 public final class ItemUtil {
     private ItemUtil() {}
@@ -14,6 +17,18 @@ public final class ItemUtil {
     public static String plainName(ItemStack stack) {
         String n = Formatting.strip(stack.getName().getString());
         return n == null ? "" : n.trim();
+    }
+
+    /** Linie opisu (lore) jako zwykły tekst, bez kolorów. */
+    public static List<String> loreLines(ItemStack stack) {
+        List<String> out = new ArrayList<>();
+        LoreComponent lore = stack.get(DataComponentTypes.LORE);
+        if (lore == null) return out;
+        for (Text line : lore.lines()) {
+            String s = Formatting.strip(line.getString());
+            if (s != null) out.add(s);
+        }
+        return out;
     }
 
     /** Cena oferty z lore ("Cena $125") albo NaN. To cena całej oferty (stacka). */
