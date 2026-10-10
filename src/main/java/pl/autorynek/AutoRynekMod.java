@@ -81,6 +81,22 @@ public class AutoRynekMod implements ClientModInitializer {
             }
         }
 
+        // Ctrl+N / Ctrl+B na przycisku w rynku = zapamiętaj go jako "następna" / "poprzednia strona"
+        if ((key == GLFW.GLFW_KEY_N || key == GLFW.GLFW_KEY_B)
+                && (modifiers & GLFW.GLFW_MOD_CONTROL) != 0 && !MarketBot.running) {
+            Slot slot = ((HandledScreenAccessor) screen).getFocusedSlot();
+            if (slot == null || mc.player == null || slot.inventory == mc.player.getInventory()) return true;
+            int index = screen.getScreenHandler().slots.indexOf(slot);
+            if (index < 0) return true;
+            Config cfg = Config.get();
+            boolean next = key == GLFW.GLFW_KEY_N;
+            if (next) cfg.nextSlot = index; else cfg.prevSlot = index;
+            cfg.save();
+            String what = slot.hasStack() ? " (" + ItemUtil.plainName(slot.getStack()) + ")" : "";
+            chat("Slot " + index + what + " = przycisk „" + (next ? "następna strona" : "poprzednia strona") + "”.");
+            return false;
+        }
+
         // Ctrl+A na przedmiocie w rynku = dodaj do listy skupu
         if (key == GLFW.GLFW_KEY_A && (modifiers & GLFW.GLFW_MOD_CONTROL) != 0 && !MarketBot.running) {
             Slot slot = ((HandledScreenAccessor) screen).getFocusedSlot();

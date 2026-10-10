@@ -42,6 +42,11 @@ public final class Config {
     public boolean buyAll = false;
     /** numer slotu przycisku odświeżania w rynku; -1 = zamknij i otwórz rynek komendą od nowa */
     public int refreshSlot = -1;
+    /** odświeżaj rynek przewracaniem stron ("następna" -> "poprzednia") zamiast zamykania i otwierania */
+    public boolean pageRefresh = true;
+    /** sloty przycisków "następna" / "poprzednia strona"; -1 = szukaj po nazwie. Ustawiane skrótami Ctrl+N / Ctrl+B w rynku. */
+    public int nextSlot = -1;
+    public int prevSlot = -1;
     /** numer slotu przycisku "Potwierdź" w oknie potwierdzenia zakupu; -1 = szukaj automatycznie po nazwie */
     public int confirmSlot = -1;
     /** wzorce wiadomości czatu rozpoznające udany zakup / przegapienie (do statystyk na HUD) */

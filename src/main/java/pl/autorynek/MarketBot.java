@@ -48,6 +48,17 @@ public final class MarketBot {
     private static boolean awaitingMarket;
     private static boolean viewDone;
     private static int marketSyncId = -1;
+    /** od kiedy wolno skanować oferty w bieżącym widoku (po otwarciu / po odświeżeniu stron) */
+    private static long readyAt;
+
+    // odświeżanie przez przewracanie stron: "następna" -> "poprzednia" (zamiast zamykania rynku)
+    private enum Flip { NONE, WAIT_NEXT, WAIT_PREV }
+
+    private static Flip flip = Flip.NONE;
+    private static long flipAt;
+    private static int flipBefore;
+    private static int flipFailures;
+    private static boolean warnedNoPages;
 
     private record Pending(long time, Config.Entry entry, double price, int count) {}
 
@@ -70,6 +81,10 @@ public final class MarketBot {
         viewDone = false;
         confirmSyncId = -1;
         confirmClicked = false;
+        flip = Flip.NONE;
+        flipFailures = 0;
+        warnedNoPages = false;
+        readyAt = 0;
         startedAt = System.currentTimeMillis();
         lastActivity = startedAt;
         foreignSince = 0;
@@ -82,6 +97,7 @@ public final class MarketBot {
         awaitingMarket = false;
         marketSyncId = -1;
         pending = null;
+        flip = Flip.NONE;
     }
 
     /** Czy to okno skrzyni zostało otwarte przez bota (a nie ręcznie przez gracza)? */
@@ -129,11 +145,15 @@ public final class MarketBot {
                 awaitingMarket = false;
                 marketSyncId = handler.syncId;
                 openedAt = now;
+                readyAt = now + 200; // poczekaj aż serwer dośle zawartość okna
+                flip = Flip.NONE;
                 viewDone = false;
                 clicked.clear();
             }
             // tuż po kliknięciu oferty: okno "POTWIERDŹ ZAKUP" (nowe okno albo to samo z podmienioną zawartością)
             if (handleConfirm(mc, player, gcs, handler, cfg, now)) return;
+            // zmiana strony może otworzyć nowe okno - wtedy uznajemy je za rynek
+            if (flip != Flip.NONE && handler.syncId != marketSyncId) marketSyncId = handler.syncId;
             if (handler.syncId != marketSyncId) {
                 // okno, którego nie otworzył bot (np. serwer sam coś otworzył po zakupie) - po chwili zamknij
                 if (foreignSince == 0) foreignSince = now;
@@ -167,7 +187,11 @@ public final class MarketBot {
 
     private static void handleMarket(MinecraftClient mc, ClientPlayerEntity player,
                                      GenericContainerScreenHandler handler, Config cfg, long now) {
-        if (now - openedAt < 200) return; // poczekaj aż serwer dośle zawartość okna
+        if (flip != Flip.NONE) {
+            handleFlip(mc, player, handler, cfg, now);
+            return;
+        }
+        if (now < readyAt) return; // poczekaj aż serwer dośle zawartość okna
 
         int chestSlots = Math.min(handler.getRows() * 9, handler.slots.size());
         int nonEmpty = 0;
@@ -336,10 +360,104 @@ public final class MarketBot {
             openedAt = now;
             viewDone = false;
             clicked.clear();
-        } else {
+        } else if (!startPageFlip(mc, player, handler, cfg, now)) {
             player.closeHandledScreen(); // następny tick otworzy rynek komendą od nowa
             marketSyncId = -1;
         }
+    }
+
+    // ---------------------------------------------------------------- odświeżanie stronami
+
+    private static final String[] NEXT_KEYS = {"nastep", "dalej", "next", "kolejn", "→", "▶", "»"};
+    private static final String[] PREV_KEYS = {"poprzed", "wstecz", "cofnij", "prev", "back", "←", "◀", "«"};
+
+    /** @return true, jeśli zaczęto odświeżanie stronami; false = użyj zwykłego zamknięcia i otwarcia rynku */
+    private static boolean startPageFlip(MinecraftClient mc, ClientPlayerEntity player,
+                                         GenericContainerScreenHandler handler, Config cfg, long now) {
+        if (!cfg.pageRefresh || flipFailures >= 2) return false;
+        int next = findPageSlot(handler, cfg.nextSlot, NEXT_KEYS);
+        int prev = findPageSlot(handler, cfg.prevSlot, PREV_KEYS);
+        if (next < 0 || prev < 0) {
+            if (!warnedNoPages) {
+                warnedNoPages = true;
+                AutoRynekMod.chat("Nie znaleziono przycisków stron - odświeżam przez ponowne otwarcie rynku. "
+                        + "Otwórz rynek ręcznie, najedź na przycisk „następna strona” i wciśnij Ctrl+N, "
+                        + "potem na „poprzednia strona” i Ctrl+B.");
+            }
+            return false;
+        }
+        flipBefore = fingerprint(handler);
+        mc.interactionManager.clickSlot(handler.syncId, next, 0, SlotActionType.PICKUP, player);
+        flip = Flip.WAIT_NEXT;
+        flipAt = now;
+        lastClick = "strona: dalej (slot " + next + ")";
+        lastActivity = now;
+        return true;
+    }
+
+    private static void handleFlip(MinecraftClient mc, ClientPlayerEntity player,
+                                   GenericContainerScreenHandler handler, Config cfg, long now) {
+        int fp = fingerprint(handler);
+        boolean loaded = nonEmptyChest(handler) > 0;
+        boolean changed = loaded && fp != flipBefore;
+        boolean timeout = now - flipAt > 900;
+        if (!changed && !timeout) return;
+
+        if (flip == Flip.WAIT_NEXT) {
+            if (changed) flipFailures = 0; else flipFailures++;
+            int prev = findPageSlot(handler, cfg.prevSlot, PREV_KEYS);
+            if (prev < 0) { // przycisk zniknął - zacznij od nowa przez otwarcie rynku
+                flip = Flip.NONE;
+                player.closeHandledScreen();
+                marketSyncId = -1;
+                return;
+            }
+            flipBefore = fp;
+            mc.interactionManager.clickSlot(handler.syncId, prev, 0, SlotActionType.PICKUP, player);
+            flip = Flip.WAIT_PREV;
+            flipAt = now;
+            lastClick = "strona: wstecz (slot " + prev + ")";
+            lastActivity = now;
+        } else { // WAIT_PREV - wróciliśmy na najnowszą stronę
+            flip = Flip.NONE;
+            openedAt = now;
+            readyAt = now;
+            viewDone = false;
+            clicked.clear();
+            lastActivity = now;
+        }
+    }
+
+    private static int findPageSlot(GenericContainerScreenHandler handler, int configured, String[] keys) {
+        if (configured >= 0 && configured < handler.slots.size()) return configured;
+        int total = Math.min(handler.getRows() * 9, handler.slots.size());
+        for (int i = 0; i < total; i++) {
+            ItemStack st = handler.slots.get(i).getStack();
+            if (st.isEmpty()) continue;
+            String n = Config.normalize(ItemUtil.plainName(st));
+            for (String k : keys) if (n.contains(k)) return i;
+        }
+        return -1;
+    }
+
+    private static int nonEmptyChest(GenericContainerScreenHandler handler) {
+        int total = Math.min(handler.getRows() * 9, handler.slots.size());
+        int n = 0;
+        for (int i = 0; i < total; i++) if (!handler.slots.get(i).getStack().isEmpty()) n++;
+        return n;
+    }
+
+    /** Odcisk zawartości okna (nazwa + ilość + cena z lore każdego slotu) do wykrycia zmiany strony. */
+    private static int fingerprint(GenericContainerScreenHandler handler) {
+        int total = Math.min(handler.getRows() * 9, handler.slots.size());
+        int h = 1;
+        for (int i = 0; i < total; i++) {
+            ItemStack st = handler.slots.get(i).getStack();
+            int v = st.isEmpty() ? 0 : java.util.Objects.hash(
+                    ItemUtil.itemId(st), st.getCount(), ItemUtil.plainName(st), ItemUtil.listingPrice(st));
+            h = 31 * h + v;
+        }
+        return h;
     }
 
     // ---------------------------------------------------------------- czat -> statystyki
