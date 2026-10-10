@@ -84,6 +84,7 @@ public final class MarketBot {
         flip = Flip.NONE;
         flipFailures = 0;
         warnedNoPages = false;
+        warnedBackFail = false;
         readyAt = 0;
         startedAt = System.currentTimeMillis();
         lastActivity = startedAt;
@@ -390,40 +391,98 @@ public final class MarketBot {
         mc.interactionManager.clickSlot(handler.syncId, next, 0, SlotActionType.PICKUP, player);
         flip = Flip.WAIT_NEXT;
         flipAt = now;
+        flipClickAt = now;
+        flipTries = 1;
         lastClick = "strona: dalej (slot " + next + ")";
         lastActivity = now;
         return true;
     }
 
+    private static int flipTries;
+    private static long flipClickAt;
+    private static boolean warnedBackFail;
+
+    private static void finishFlip(long now) {
+        flip = Flip.NONE;
+        openedAt = now;
+        readyAt = now;
+        viewDone = false;
+        clicked.clear();
+        lastActivity = now;
+    }
+
     private static void handleFlip(MinecraftClient mc, ClientPlayerEntity player,
                                    GenericContainerScreenHandler handler, Config cfg, long now) {
         int fp = fingerprint(handler);
-        boolean loaded = nonEmptyChest(handler) > 0;
-        boolean changed = loaded && fp != flipBefore;
-        boolean timeout = now - flipAt > 900;
-        if (!changed && !timeout) return;
+        boolean changed = nonEmptyChest(handler) > 0 && fp != flipBefore;
+        long sinceClick = now - flipClickAt;
+        long retryMs = Math.max(400, cfg.clickMs * 3L); // serwer potrafi zignorować zbyt szybkie kliknięcie
 
         if (flip == Flip.WAIT_NEXT) {
-            if (changed) flipFailures = 0; else flipFailures++;
+            if (changed) {
+                if (sinceClick < cfg.clickMs) return; // zachowaj odstęp między kliknięciami
+                int prev = findPageSlot(handler, cfg.prevSlot, PREV_KEYS);
+                if (prev < 0) { // zawartość strony jeszcze się dosyła
+                    if (now - flipAt > 1500) {
+                        flip = Flip.NONE; // nie ma jak wrócić - otwórz rynek od nowa
+                        player.closeHandledScreen();
+                        marketSyncId = -1;
+                    }
+                    return;
+                }
+                flipFailures = 0;
+                flipBefore = fp;
+                mc.interactionManager.clickSlot(handler.syncId, prev, 0, SlotActionType.PICKUP, player);
+                flip = Flip.WAIT_PREV;
+                flipAt = now;
+                flipClickAt = now;
+                flipTries = 1;
+                lastClick = "strona: wstecz (slot " + prev + ")";
+                lastActivity = now;
+                return;
+            }
+            if (sinceClick > retryMs) {
+                if (flipTries >= 2) { // "następna" nic nie zmieniła (np. rynek ma jedną stronę)
+                    flipFailures++;
+                    finishFlip(now);
+                    return;
+                }
+                int next = findPageSlot(handler, cfg.nextSlot, NEXT_KEYS);
+                if (next >= 0) {
+                    mc.interactionManager.clickSlot(handler.syncId, next, 0, SlotActionType.PICKUP, player);
+                    lastClick = "strona: dalej (ponowienie)";
+                }
+                flipTries++;
+                flipClickAt = now;
+                lastActivity = now;
+            }
+            return;
+        }
+
+        // WAIT_PREV - czekamy aż naprawdę wrócimy na najnowszą stronę (zawartość musi się znów zmienić)
+        if (changed) {
+            finishFlip(now);
+            return;
+        }
+        if (sinceClick > retryMs) {
             int prev = findPageSlot(handler, cfg.prevSlot, PREV_KEYS);
-            if (prev < 0) { // przycisk zniknął - zacznij od nowa przez otwarcie rynku
+            if (flipTries >= 3 || prev < 0) {
+                // nie udało się wrócić - zamykamy i otwieramy rynek, żeby na pewno zacząć od strony 1
+                if (!warnedBackFail) {
+                    warnedBackFail = true;
+                    AutoRynekMod.chat("Nie udało się wrócić na pierwszą stronę przyciskiem - otwieram rynek od nowa. "
+                            + "Jeśli to się powtarza, zwiększ \"Klik (ms)\".");
+                }
                 flip = Flip.NONE;
+                flipFailures++;
                 player.closeHandledScreen();
                 marketSyncId = -1;
                 return;
             }
-            flipBefore = fp;
             mc.interactionManager.clickSlot(handler.syncId, prev, 0, SlotActionType.PICKUP, player);
-            flip = Flip.WAIT_PREV;
-            flipAt = now;
-            lastClick = "strona: wstecz (slot " + prev + ")";
-            lastActivity = now;
-        } else { // WAIT_PREV - wróciliśmy na najnowszą stronę
-            flip = Flip.NONE;
-            openedAt = now;
-            readyAt = now;
-            viewDone = false;
-            clicked.clear();
+            lastClick = "strona: wstecz (ponowienie)";
+            flipTries++;
+            flipClickAt = now;
             lastActivity = now;
         }
     }
