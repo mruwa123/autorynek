@@ -85,6 +85,11 @@ public final class MarketBot {
         flipFailures = 0;
         warnedNoPages = false;
         warnedBackFail = false;
+        flipOk = 0;
+        flipRetries = 0;
+        flipReopens = 0;
+        cleanStreak = 0;
+        flipGap = 0;
         readyAt = 0;
         startedAt = System.currentTimeMillis();
         lastActivity = startedAt;
@@ -402,7 +407,28 @@ public final class MarketBot {
     private static long flipClickAt;
     private static boolean warnedBackFail;
 
-    private static void finishFlip(long now) {
+    /** statystyki odświeżania stronami (HUD) i automatyczne dobieranie odstępu między kliknięciami stron */
+    private static int flipOk;
+    private static int flipRetries;
+    private static int flipReopens;
+    private static int cleanStreak;
+    private static long flipGap;
+
+    private static void noteRetry() {
+        flipRetries++;
+        cleanStreak = 0;
+        // serwer zignorował kliknięcie - zwiększ odstęp, żeby się dopasować do jego limitu
+        flipGap = Math.min(400, Math.max(flipGap, Config.get().clickMs) + 50);
+    }
+
+    private static void finishFlip(long now, boolean ok) {
+        if (ok) {
+            flipOk++;
+            if (++cleanStreak >= 15) { // dużo czystych przewrotów z rzędu - spróbuj znów przyspieszyć
+                cleanStreak = 0;
+                flipGap = Math.max(0, flipGap - 25);
+            }
+        }
         flip = Flip.NONE;
         openedAt = now;
         readyAt = now;
@@ -416,11 +442,12 @@ public final class MarketBot {
         int fp = fingerprint(handler);
         boolean changed = nonEmptyChest(handler) > 0 && fp != flipBefore;
         long sinceClick = now - flipClickAt;
-        long retryMs = Math.max(400, cfg.clickMs * 3L); // serwer potrafi zignorować zbyt szybkie kliknięcie
+        long gap = Math.max(cfg.clickMs, flipGap);
+        long retryMs = Math.max(250, gap * 2); // serwer potrafi zignorować zbyt szybkie kliknięcie
 
         if (flip == Flip.WAIT_NEXT) {
             if (changed) {
-                if (sinceClick < cfg.clickMs) return; // zachowaj odstęp między kliknięciami
+                if (sinceClick < gap) return; // zachowaj odstęp między kliknięciami
                 int prev = findPageSlot(handler, cfg.prevSlot, PREV_KEYS);
                 if (prev < 0) { // zawartość strony jeszcze się dosyła
                     if (now - flipAt > 1500) {
@@ -444,7 +471,7 @@ public final class MarketBot {
             if (sinceClick > retryMs) {
                 if (flipTries >= 2) { // "następna" nic nie zmieniła (np. rynek ma jedną stronę)
                     flipFailures++;
-                    finishFlip(now);
+                    finishFlip(now, false);
                     return;
                 }
                 int next = findPageSlot(handler, cfg.nextSlot, NEXT_KEYS);
@@ -452,6 +479,7 @@ public final class MarketBot {
                     mc.interactionManager.clickSlot(handler.syncId, next, 0, SlotActionType.PICKUP, player);
                     lastClick = "strona: dalej (ponowienie)";
                 }
+                noteRetry();
                 flipTries++;
                 flipClickAt = now;
                 lastActivity = now;
@@ -461,12 +489,12 @@ public final class MarketBot {
 
         // WAIT_PREV - czekamy aż naprawdę wrócimy na najnowszą stronę (zawartość musi się znów zmienić)
         if (changed) {
-            finishFlip(now);
+            finishFlip(now, true);
             return;
         }
         if (sinceClick > retryMs) {
             int prev = findPageSlot(handler, cfg.prevSlot, PREV_KEYS);
-            if (flipTries >= 3 || prev < 0) {
+            if (flipTries >= 4 || prev < 0) {
                 // nie udało się wrócić - zamykamy i otwieramy rynek, żeby na pewno zacząć od strony 1
                 if (!warnedBackFail) {
                     warnedBackFail = true;
@@ -475,12 +503,14 @@ public final class MarketBot {
                 }
                 flip = Flip.NONE;
                 flipFailures++;
+                flipReopens++;
                 player.closeHandledScreen();
                 marketSyncId = -1;
                 return;
             }
             mc.interactionManager.clickSlot(handler.syncId, prev, 0, SlotActionType.PICKUP, player);
             lastClick = "strona: wstecz (ponowienie)";
+            noteRetry();
             flipTries++;
             flipClickAt = now;
             lastActivity = now;
@@ -558,16 +588,17 @@ public final class MarketBot {
         TextRenderer tr = mc.textRenderer;
 
         String mode = Config.get().buyAll ? "Wszyst." : "Pojed.";
-        String[] labels = {"Czas:", "Kupione:", "Wydano:", "Zaoszczędzono:", "Przegapione:", "Klik:"};
+        String[] labels = {"Czas:", "Kupione:", "Wydano:", "Zaoszczędzono:", "Przegapione:", "Klik:", "Strony:"};
         String[] values = {
                 Fmt.time(System.currentTimeMillis() - startedAt),
                 bought + " szt.",
                 Fmt.money(spent),
                 Fmt.money(saved),
                 String.valueOf(missed),
-                lastClick
+                lastClick,
+                flipOk + " (powt. " + flipRetries + ", reopen " + flipReopens + ", odstęp " + Math.max(Config.get().clickMs, flipGap) + " ms)"
         };
-        int[] colors = {WHITE, WHITE, RED, GREEN, RED, YELLOW};
+        int[] colors = {WHITE, WHITE, RED, GREEN, RED, YELLOW, GRAY};
         String suffix = " (ktoś ubiegł)";
 
         int labelW = 0;
